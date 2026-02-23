@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  release:
+    runs-on: ubuntu-latest
+    needs: ci
+    timeout-minutes: 30
+    concurrency:
+      group: ${{ github.workflow }}-release-${{ github.ref_name }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - name: Setup | Checkout Repository at workflow sha
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Setup | Force correct release branch on workflow sha
+        run: git checkout -B ${{ github.ref_name }}
+
+      - name: Setup | Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+
+      - name: Setup | Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Setup | Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "lts/*"
+
+      - name: Setup | Install Python & Project dependencies
+        run: uv sync --frozen --no-dev --group release
+
+      # Runs semantic-release to determine whether a new release should be cut.
+      # If there are no release-worthy commits (e.g. only "ci:"), the step succeeds,
+      # sets outputs with released=false, and publish steps can be skipped.
+      - name: Release | Create version + tag (+ GitHub Release)
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag_before="$(git describe --tags --exact-match HEAD 2>/dev/null || true)"
+
+          if ! output="$(uv run semantic-release -v version 2>&1)"; then
+            if [[ "$output" =~ [Nn]o[[:space:]]+(release|relevant) ]]; then
+              echo "released=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "$output" >&2
+            exit 1
+          fi
+          echo "$output"
+
+          tag_after="$(git describe --tags --exact-match HEAD 2>/dev/null || true)"
+
+          # Validate tag is a valid semver (ignores non-semver tags like "build-123")
+          if [[ -n "$tag_after" ]]; then
+            version_clean="$(npx -y semver "${tag_after#v}" 2>/dev/null || true)"
+            if [[ -z "$version_clean" ]]; then
+              tag_after=""
+            fi
+          fi
+
+          if [[ -n "$tag_after" && "$tag_after" != "$tag_before" ]]; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "version=${tag_after#v}" >> "$GITHUB_OUTPUT"
+            echo "tag=$tag_after" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
