@@ -20,18 +20,23 @@ Shared Python runtime utilities for internal microservices.
 Install dependencies:
 
 ```bash
-uv sync --frozen
+task install
 ```
 
 Run package tests:
 
 ```bash
-uv run pytest -q tests/sdx_core
+task test
 ```
 
 Run checks:
 
 ```bash
-uv run ruff check src tests
-uv run mypy src tests
+task code:check
+```
+
+Format + fix code:
+
+```bash
+task code
 ```
