@@ -5,7 +5,7 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
-from sdx_core.settings import CoreSettings
+from sdx_core.settings import CoreSettings, prefixed_settings_config
 
 
 def _build_settings(**overrides: object) -> CoreSettings:
@@ -95,3 +95,31 @@ def test_core_settings_rejects_invalid_reconnect_backoff_bounds() -> None:
 def test_core_settings_rejects_non_positive_socket_setup_timeout() -> None:
     with pytest.raises(ValidationError):
         _build_settings(kafka_socket_connection_setup_timeout_ms=0)
+
+
+def test_prefixed_settings_config_builds_case_insensitive_config() -> None:
+    config = prefixed_settings_config("APP_")
+    assert config["env_prefix"] == "APP_"
+    assert config["case_sensitive"] is False
+
+
+def test_core_settings_rejects_blank_required_kafka_strings() -> None:
+    with pytest.raises(ValidationError):
+        _build_settings(kafka_group_id="   ")
+
+
+def test_core_settings_rejects_negative_reconnect_backoff() -> None:
+    with pytest.raises(ValidationError):
+        _build_settings(kafka_reconnect_backoff_ms=-1)
+
+
+def test_core_settings_required_string_validator_passes_through_non_strings() -> None:
+    with pytest.raises(ValidationError):
+        _build_settings(kafka_group_id=123)
+
+
+def test_core_settings_protocol_validator_returns_non_strings_for_type_checking() -> (
+    None
+):
+    with pytest.raises(ValidationError):
+        _build_settings(kafka_security_protocol=123)

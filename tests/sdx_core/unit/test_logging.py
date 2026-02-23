@@ -10,6 +10,7 @@ import structlog
 from faststream import ContextRepo
 
 from sdx_core.logging import (
+    _build_faststream_context_merger,
     configure_structlog,
     get_log_level_value,
     log_error,
@@ -147,3 +148,67 @@ def test_structured_log_helpers_support_stdlib_logger_extra() -> None:
     assert record.getMessage() == "message.received"
     assert typed_record.topic == "topic-a"
     assert typed_record.offset == 42
+
+
+def test_faststream_context_merger_returns_original_when_context_missing() -> None:
+    processor = _build_faststream_context_merger(None)
+    event_dict: structlog.typing.EventDict = {"event": "test"}
+
+    merged = processor(None, "info", event_dict)
+
+    assert merged is event_dict
+    assert merged == {"event": "test"}
+
+
+def test_faststream_context_merger_ignores_lookup_error() -> None:
+    class _LookupFailingContext:
+        def get_local(self, name: str) -> object:
+            _ = name
+            raise LookupError("missing")
+
+    processor = _build_faststream_context_merger(
+        cast(ContextRepo, _LookupFailingContext())
+    )
+    event_dict: structlog.typing.EventDict = {"event": "test"}
+
+    merged = processor(None, "info", event_dict)
+
+    assert merged == {"event": "test"}
+
+
+def test_faststream_context_merger_ignores_non_mapping_context() -> None:
+    class _ScalarContext:
+        def get_local(self, name: str) -> object:
+            _ = name
+            return "not-a-mapping"
+
+    processor = _build_faststream_context_merger(cast(ContextRepo, _ScalarContext()))
+    event_dict: structlog.typing.EventDict = {"event": "test"}
+
+    merged = processor(None, "info", event_dict)
+
+    assert merged == {"event": "test"}
+
+
+def test_faststream_context_merger_merges_extra_with_log_context() -> None:
+    class _MappingContext:
+        def get_local(self, name: str) -> object:
+            _ = name
+            return {"topic": "from-context", 123: "numeric-key"}
+
+    processor = _build_faststream_context_merger(cast(ContextRepo, _MappingContext()))
+    event_dict: structlog.typing.EventDict = {
+        "event": "test",
+        "extra": {"topic": "from-event", "offset": 7},
+    }
+
+    merged = processor(None, "info", event_dict)
+
+    assert isinstance(merged, dict)
+    extra = merged.get("extra")
+    assert isinstance(extra, dict)
+    assert cast(dict[str, object], extra) == {
+        "topic": "from-context",
+        "offset": 7,
+        "123": "numeric-key",
+    }

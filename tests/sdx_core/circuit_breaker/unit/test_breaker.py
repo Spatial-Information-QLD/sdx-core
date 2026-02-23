@@ -253,3 +253,54 @@ async def test_listener_exceptions_are_swallowed() -> None:
 
     assert await breaker.call(_ok) == "ok"
     assert ("succeeded", "svc") in recording.events
+
+
+async def test_config_rejects_invalid_threshold_and_timeout() -> None:
+    with pytest.raises(ValueError, match="failure_threshold"):
+        CircuitBreakerConfig(failure_threshold=0)
+    with pytest.raises(ValueError, match="recovery_timeout"):
+        CircuitBreakerConfig(recovery_timeout=-1.0)
+
+
+async def test_probe_gate_uses_thread_lock_when_gil_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "sdx_core.circuit_breaker.breaker.sys._is_gil_enabled",
+        lambda: False,
+        raising=False,
+    )
+    gate = breaker_mod._ProbeGate()
+
+    assert gate.try_acquire() is True
+    assert gate.try_acquire() is False
+    gate.release()
+    assert gate.try_acquire() is True
+    gate.release()
+
+
+async def test_listener_exceptions_are_swallowed_for_all_non_success_events() -> None:
+    storage = InMemoryBreakerStorage()
+    recording = _RecordingListener()
+    breaker = CircuitBreaker(
+        "svc",
+        config=CircuitBreakerConfig(failure_threshold=1, recovery_timeout=10.0),
+        storage=storage,
+        listeners=[_ExplodingListener(), recording],
+    )
+
+    async def _fail() -> None:
+        raise RuntimeError("nope")
+
+    with pytest.raises(RuntimeError):
+        await breaker.call(_fail)
+
+    with pytest.raises(CircuitOpenError):
+        await breaker.call(_fail)
+
+    assert ("failed", ("svc", "RuntimeError")) in recording.events
+    assert (
+        "state",
+        ("svc", CircuitState.CLOSED, CircuitState.OPEN),
+    ) in recording.events
+    assert ("rejected", "svc") in recording.events
