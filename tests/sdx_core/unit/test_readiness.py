@@ -6,6 +6,7 @@ import time
 from typing import cast
 
 import pytest
+from confluent_kafka.admin import AdminClient
 
 import sdx_core.readiness as readiness_mod
 from sdx_core.readiness import (
@@ -507,3 +508,132 @@ async def test_readiness_manager_background_loop_and_stop() -> None:
     await manager.start_background()
     await manager.stop_background()
     await manager.stop_background()
+
+
+async def test_get_check_result_returns_match_or_none() -> None:
+    snapshot = ReadinessSnapshot(
+        status="degraded",
+        ready=False,
+        reason="dependency_unavailable",
+        detail="not ready",
+        last_checked_at=1.0,
+        check_results=(
+            CheckResult(name="kafka", ok=True),
+            CheckResult(name="esri", ok=False),
+        ),
+    )
+
+    assert readiness_mod.get_check_result(snapshot, "esri") == snapshot.check_results[1]
+    assert readiness_mod.get_check_result(snapshot, "missing") is None
+
+
+async def test_readiness_manager_rejects_empty_checks() -> None:
+    with pytest.raises(ValueError, match="At least one readiness check is required"):
+        ReadinessManager(checks=(), interval_seconds=1.0)
+
+
+async def test_readiness_manager_get_check_result_uses_cached_snapshot() -> None:
+    async def _check() -> CheckResult:
+        return CheckResult(name="dep", ok=True)
+
+    manager = ReadinessManager(
+        checks=(_check,),
+        interval_seconds=0.01,
+    )
+    await manager.evaluate_once(source="startup")
+
+    result = manager.get_check_result("dep")
+
+    assert result is not None
+    assert result.ok is True
+
+
+async def test_metadata_fetch_coordinator_resets_inflight_on_success() -> None:
+    class _CoordinatorWithoutDoneCallback(readiness_mod._MetadataFetchCoordinator):
+        def _make_fetch_task(
+            self,
+            *,
+            admin: AdminClient,
+            timeout_seconds: float,
+        ) -> asyncio.Task[object]:
+            return asyncio.create_task(
+                readiness_mod._run_in_daemon_thread_and_wait(
+                    admin.list_topics,
+                    timeout=timeout_seconds,
+                )
+            )
+
+    class _Admin:
+        def list_topics(self, timeout: float) -> object:
+            _ = timeout
+            return _metadata_for({"in"})
+
+    coordinator = _CoordinatorWithoutDoneCallback()
+    metadata = await coordinator.fetch(
+        admin=cast(AdminClient, _Admin()), timeout_seconds=1.0
+    )
+
+    assert getattr(metadata, "topics", None) is not None
+    assert coordinator._inflight_task is None
+
+
+async def test_metadata_fetch_coordinator_resets_inflight_on_fetch_failure() -> None:
+    class _CoordinatorWithoutDoneCallback(readiness_mod._MetadataFetchCoordinator):
+        def _make_fetch_task(
+            self,
+            *,
+            admin: AdminClient,
+            timeout_seconds: float,
+        ) -> asyncio.Task[object]:
+            return asyncio.create_task(
+                readiness_mod._run_in_daemon_thread_and_wait(
+                    admin.list_topics,
+                    timeout=timeout_seconds,
+                )
+            )
+
+    class _FailingAdmin:
+        def list_topics(self, timeout: float) -> object:
+            _ = timeout
+            raise RuntimeError("broken broker")
+
+    coordinator = _CoordinatorWithoutDoneCallback()
+
+    with pytest.raises(RuntimeError, match="broken broker"):
+        await coordinator.fetch(
+            admin=cast(AdminClient, _FailingAdmin()),
+            timeout_seconds=1.0,
+        )
+
+    assert coordinator._inflight_task is None
+
+
+async def test_readiness_manager_stop_background_cancels_task_after_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ReadinessManager(
+        checks=(
+            make_callable_check(
+                name="dep",
+                check=lambda: True,
+                reason_when_false="dependency_unavailable",
+                detail_when_false="not ready",
+            ),
+        ),
+        interval_seconds=0.01,
+    )
+
+    async def _never_finishes() -> None:
+        await asyncio.Event().wait()
+
+    stalled = asyncio.create_task(_never_finishes(), name="stalled-readiness-task")
+    manager._task = stalled
+
+    async def _raise_timeout(awaitable: object, timeout: float) -> object:
+        _ = (awaitable, timeout)
+        raise TimeoutError
+
+    monkeypatch.setattr(asyncio, "wait_for", _raise_timeout)
+    await manager.stop_background()
+
+    assert manager._task is None

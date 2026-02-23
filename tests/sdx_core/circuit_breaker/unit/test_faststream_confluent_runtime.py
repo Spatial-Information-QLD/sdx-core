@@ -93,6 +93,52 @@ async def test_pauser_noops_when_subscriber_consumer_missing() -> None:
     await pauser.resume_assigned()
 
 
+async def test_pauser_noops_for_non_subscriber_object() -> None:
+    pauser = ConfluentAssignmentPauser(subscriber=object())
+    await pauser.pause_assigned()
+    await pauser.resume_assigned()
+
+
+async def test_pauser_pause_noops_without_assignments() -> None:
+    confluent_consumer = _FakeConfluentConsumer(assignments=())
+    subscriber = _FakeSubscriber(
+        consumer=_FakeAsyncConfluentConsumer(confluent_consumer)
+    )
+    pauser = ConfluentAssignmentPauser(subscriber=subscriber)
+
+    await pauser.pause_assigned()
+
+    assert confluent_consumer.pause_calls == 0
+
+
+async def test_pauser_pause_is_idempotent_when_already_paused() -> None:
+    confluent_consumer = _FakeConfluentConsumer(assignments=("tp-1",))
+    subscriber = _FakeSubscriber(
+        consumer=_FakeAsyncConfluentConsumer(confluent_consumer)
+    )
+    pauser = ConfluentAssignmentPauser(subscriber=subscriber)
+
+    await pauser.pause_assigned()
+    await pauser.pause_assigned()
+
+    assert confluent_consumer.pause_calls == 1
+
+
+async def test_pauser_resume_clears_paused_flag_when_consumer_becomes_missing() -> None:
+    confluent_consumer = _FakeConfluentConsumer(assignments=("tp-1",))
+    subscriber = _FakeSubscriber(
+        consumer=_FakeAsyncConfluentConsumer(confluent_consumer)
+    )
+    pauser = ConfluentAssignmentPauser(subscriber=subscriber)
+
+    await pauser.pause_assigned()
+    subscriber.consumer = None
+    await pauser.resume_assigned()
+    await pauser.resume_assigned()
+
+    assert confluent_consumer.resume_calls == 0
+
+
 async def test_listener_open_pauses_and_schedules_resume() -> None:
     pauser = _RecordingPauser()
     listener = CircuitPauseResumeListener(
@@ -149,3 +195,16 @@ async def test_listener_half_open_to_closed_resumes_and_cancels_task() -> None:
     assert pauser.pause_calls == 1
     assert pauser.resume_calls == 1
     assert blocking_sleep.cancelled >= 1
+
+
+async def test_listener_noop_callbacks_and_close_without_task() -> None:
+    pauser = _RecordingPauser()
+    listener = CircuitPauseResumeListener(
+        pauser=pauser,
+        recovery_timeout_seconds=0.1,
+    )
+
+    await listener.on_call_rejected("svc")
+    await listener.on_call_succeeded("svc", 0.1)
+    await listener.on_call_failed("svc", RuntimeError("boom"), 0.2)
+    await listener.close()
