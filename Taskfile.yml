@@ -1,0 +1,35 @@
+# https://taskfile.dev
+
+version: "3"
+
+tasks:
+  install:
+    desc: Install project dependencies.
+    cmds:
+      - uv sync --frozen
+
+  code:check:
+    desc: Check whether code formatting rules apply.
+    cmds:
+      - uv run ruff format --check
+      - uv run ruff check
+      - uv run ruff check --select D101,D102,D103,D107 src
+      - uv run mypy src tests
+
+  code:
+    desc: Format and standardise code.
+    cmds:
+      - uv run ruff format
+      - uv run ruff check --fix
+      - uv run ruff check --select D101,D102,D103,D107 src
+      - uv run mypy src tests
+
+  test:
+    desc: Run Python tests.
+    cmds:
+      - uv run pytest
+
+  test:cov:
+    desc: Run tests with coverage enforcement (>=90%).
+    cmds:
+      - uv run pytest --cov=src --cov-report=term-missing --cov-fail-under=90

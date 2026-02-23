@@ -11,6 +11,10 @@ Shared Python runtime utilities for internal microservices.
 - `sdx_core.retry`: retry policy primitives and interruptible backoff helpers.
 - `sdx_core.headers`, `sdx_core.readiness`, `sdx_core.replay_counter`, `sdx_core.errors`: shared utility modules.
 
+## Example usage
+
+- [`qali-internal-geocode-svc`](https://github.com/Spatial-Information-QLD/qali-internal-geocode-svc) is a consumer of `sdx_core` and demonstrates usage of the ESRI client, circuit breaker, and logging/runtime helpers in a production microservice.
+
 ## Development
 
 Install dependencies:
