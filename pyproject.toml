@@ -1,7 +1,7 @@
 [project]
 name = "sdx-core"
 version = "0.1.0"
-description = "Add your description here"
+description = "This library contains common utilities for SDX microservices, including an ESRI client, circuit breaker, retry policies, and logging/runtime helpers."
 readme = "README.md"
 authors = [
     { name = "Edmond Chuc", email = "edmond@kurrawong.ai" }
