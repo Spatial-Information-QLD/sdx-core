@@ -1,6 +1,6 @@
 [project]
 name = "sdx-core"
-version = "1.0.0"
+version = "1.0.1"
 description = "This library contains common utilities for SDX microservices, including an ESRI client, circuit breaker, retry policies, and logging/runtime helpers."
 readme = "README.md"
 authors = [
