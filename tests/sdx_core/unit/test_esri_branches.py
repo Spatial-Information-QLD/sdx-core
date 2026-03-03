@@ -74,7 +74,7 @@ async def test_ensure_token_rechecks_cache_inside_token_lock(
         assert await token_task == "cached"
 
 
-async def test_apply_edits_maps_invalid_token_exhaustion_to_auth_unavailable(
+async def test_apply_edits_to_layer_maps_invalid_token_exhaustion_to_auth_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with httpx.AsyncClient() as http_client:
@@ -83,19 +83,20 @@ async def test_apply_edits_maps_invalid_token_exhaustion_to_auth_unavailable(
         async def _raise_invalid(
             payload: dict[str, object],
             *,
+            mode: str,
             stop_event: asyncio.Event | None,
         ) -> dict[str, object]:
-            _ = (payload, stop_event)
+            _ = (payload, mode, stop_event)
             raise esri_mod.EsriInvalidToken("bad token")
 
         monkeypatch.setattr(client, "_apply_edits_once", _raise_invalid)
 
         with pytest.raises(EsriAuthUnavailable, match="Token recovery failed"):
-            await client.apply_edits({})
+            await client.apply_edits_to_layer({})
         assert client._auth_failed is True
 
 
-async def test_apply_edits_propagates_processing_interrupted(
+async def test_apply_edits_to_layer_propagates_processing_interrupted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with httpx.AsyncClient() as http_client:
@@ -104,18 +105,19 @@ async def test_apply_edits_propagates_processing_interrupted(
         async def _raise_interrupted(
             payload: dict[str, object],
             *,
+            mode: str,
             stop_event: asyncio.Event | None,
         ) -> dict[str, object]:
-            _ = (payload, stop_event)
+            _ = (payload, mode, stop_event)
             raise EsriProcessingInterrupted("stop now")
 
         monkeypatch.setattr(client, "_apply_edits_once", _raise_interrupted)
 
         with pytest.raises(EsriProcessingInterrupted):
-            await client.apply_edits({})
+            await client.apply_edits_to_layer({})
 
 
-async def test_apply_edits_sets_auth_failed_when_auth_unavailable(
+async def test_apply_edits_to_layer_sets_auth_failed_when_auth_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with httpx.AsyncClient() as http_client:
@@ -124,19 +126,20 @@ async def test_apply_edits_sets_auth_failed_when_auth_unavailable(
         async def _raise_auth_unavailable(
             payload: dict[str, object],
             *,
+            mode: str,
             stop_event: asyncio.Event | None,
         ) -> dict[str, object]:
-            _ = (payload, stop_event)
+            _ = (payload, mode, stop_event)
             raise EsriAuthUnavailable("auth dependency unavailable")
 
         monkeypatch.setattr(client, "_apply_edits_once", _raise_auth_unavailable)
 
         with pytest.raises(EsriAuthUnavailable):
-            await client.apply_edits({})
+            await client.apply_edits_to_layer({})
         assert client._auth_failed is True
 
 
-async def test_apply_edits_raises_runtime_error_if_retry_loop_returns_nothing(
+async def test_apply_edits_to_layer_raises_runtime_error_if_retry_loop_returns_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with httpx.AsyncClient() as http_client:
@@ -148,7 +151,7 @@ async def test_apply_edits_raises_runtime_error_if_retry_loop_returns_nothing(
         with pytest.raises(
             RuntimeError, match="applyEdits retry loop exited unexpectedly"
         ):
-            await client.apply_edits({})
+            await client.apply_edits_to_layer({})
 
 
 async def test_refresh_token_with_retry_propagates_processing_interrupted() -> None:
@@ -249,7 +252,7 @@ async def test_apply_edits_once_wraps_request_errors(
         monkeypatch.setattr(http_client, "post", _raise_request_error)
 
         with pytest.raises(EsriTransientFailure, match="downstream unavailable"):
-            await client._apply_edits_once({}, stop_event=None)
+            await client._apply_edits_once({}, mode="layer", stop_event=None)
 
 
 async def test_parse_json_object_raises_for_invalid_json_payload() -> None:
@@ -270,6 +273,98 @@ async def test_parse_json_object_raises_for_non_mapping_json_payload() -> None:
             response,
             context_message="must be object",
         )
+
+
+async def test_build_form_data_preserves_scalar_values() -> None:
+    form_data = FeatureServiceClient._build_form_data(
+        "token-1",
+        {
+            "edits": [{"id": 2}],
+            "returnServiceEditsOption": "originalAndCurrentFeatures",
+            "useGlobalIds": False,
+            "layer": 3,
+        },
+    )
+
+    assert form_data == {
+        "f": "json",
+        "token": "token-1",
+        "rollbackOnFailure": "true",
+        "edits": '[{"id": 2}]',
+        "returnServiceEditsOption": "originalAndCurrentFeatures",
+        "useGlobalIds": "false",
+        "layer": "3",
+    }
+
+
+async def test_parse_layer_response_data_accepts_json_object() -> None:
+    response = httpx.Response(
+        200,
+        text='{"updateResults":[{"id":0}]}',
+    )
+
+    parsed = FeatureServiceClient._parse_layer_response_data(response)
+
+    assert parsed == {"updateResults": [{"id": 0}]}
+
+
+async def test_parse_service_response_data_accepts_json_object() -> None:
+    response = httpx.Response(
+        200,
+        text='{"editedFeatureResults":[{"id":0}]}',
+    )
+
+    parsed = FeatureServiceClient._parse_service_response_data(response)
+
+    assert parsed == {"editedFeatureResults": [{"id": 0}]}
+
+
+async def test_parse_service_response_data_wraps_json_array() -> None:
+    response = httpx.Response(
+        200,
+        text='[{"id":0,"editedFeatures":{"adds":[{"attributes":{"iri":"https://example.com/a/1","pid":123}}]}}]',
+    )
+
+    parsed = FeatureServiceClient._parse_service_response_data(response)
+
+    assert parsed == {
+        "editedFeatureResults": [
+            {
+                "id": 0,
+                "editedFeatures": {
+                    "adds": [
+                        {
+                            "attributes": {
+                                "iri": "https://example.com/a/1",
+                                "pid": 123,
+                            }
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+
+
+async def test_parse_layer_response_data_rejects_json_array() -> None:
+    response = httpx.Response(200, json=["not", "an", "object"])
+
+    with pytest.raises(EsriRequestError, match="Layer applyEdits response"):
+        FeatureServiceClient._parse_layer_response_data(response)
+
+
+async def test_parse_service_response_data_rejects_non_object_non_array() -> None:
+    response = httpx.Response(200, text='"not-an-object"')
+
+    with pytest.raises(EsriRequestError, match="valid JSON object"):
+        FeatureServiceClient._parse_service_response_data(response)
+
+
+async def test_parse_service_response_data_rejects_invalid_json() -> None:
+    response = httpx.Response(200, text="{")
+
+    with pytest.raises(EsriRequestError, match="valid JSON object"):
+        FeatureServiceClient._parse_service_response_data(response)
 
 
 async def test_raise_for_http_status_maps_auth_statuses() -> None:

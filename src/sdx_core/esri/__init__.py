@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast
 
 import httpx
 from tenacity import AsyncRetrying, retry_if_exception_type
@@ -18,7 +18,8 @@ from sdx_core.esri.constants import (
     TOKEN_STOP_MESSAGE,
 )
 from sdx_core.esri.helpers import (
-    count_rejected_edits,
+    count_rejected_layer_edits,
+    count_rejected_service_edits,
     extract_esri_error_code,
     summarize_esri_error,
 )
@@ -129,6 +130,9 @@ class _Token:
         return time.time() >= (self.expires_at_epoch - buffer_seconds)
 
 
+type _ApplyEditsMode = Literal["layer", "service"]
+
+
 class FeatureServiceClient:
     """Feature service client with bounded retries and token recovery."""
 
@@ -151,7 +155,7 @@ class FeatureServiceClient:
 
         Args:
             client: Shared async HTTP client.
-            feature_service_url: ESRI feature service layer URL.
+            feature_service_url: ESRI FeatureServer service or layer URL.
             username: Username used for token generation.
             password: Password used for token generation.
             referer: Referer header required by ESRI token endpoint.
@@ -207,10 +211,29 @@ class FeatureServiceClient:
         async with self._token_lock:
             self._token = None
 
-    async def apply_edits(
+    async def apply_edits_to_layer(
         self,
         payload: dict[str, object],
         *,
+        stop_event: asyncio.Event | None = None,
+    ) -> dict[str, object]:
+        """Submit applyEdits to a specific FeatureServer layer endpoint."""
+        return await self._apply_edits(payload, mode="layer", stop_event=stop_event)
+
+    async def apply_edits_to_service(
+        self,
+        payload: dict[str, object],
+        *,
+        stop_event: asyncio.Event | None = None,
+    ) -> dict[str, object]:
+        """Submit applyEdits to a FeatureServer service endpoint."""
+        return await self._apply_edits(payload, mode="service", stop_event=stop_event)
+
+    async def _apply_edits(
+        self,
+        payload: dict[str, object],
+        *,
+        mode: _ApplyEditsMode,
         stop_event: asyncio.Event | None = None,
     ) -> dict[str, object]:
         """Submit one applyEdits request with transient retry and token recovery."""
@@ -227,6 +250,7 @@ class FeatureServiceClient:
                     self._raise_if_stopped(stop_event, APPLY_EDITS_STOP_MESSAGE)
                     response_data = await self._apply_edits_once(
                         payload,
+                        mode=mode,
                         stop_event=stop_event,
                     )
                     self._auth_failed = False
@@ -330,6 +354,7 @@ class FeatureServiceClient:
         self,
         payload: dict[str, object],
         *,
+        mode: _ApplyEditsMode,
         stop_event: asyncio.Event | None,
     ) -> dict[str, object]:
         token = await self.ensure_token(stop_event=stop_event)
@@ -344,7 +369,7 @@ class FeatureServiceClient:
         except httpx.RequestError as exc:
             raise EsriTransientFailure(str(exc)) from exc
 
-        response_data = self._parse_response_data(response)
+        response_data = self._parse_apply_edits_response_data(response, mode=mode)
         try:
             self._raise_for_esri_error(
                 response_data=response_data,
@@ -353,6 +378,7 @@ class FeatureServiceClient:
             self._raise_for_rejected_edits(
                 response_data=response_data,
                 http_status=response.status_code,
+                mode=mode,
             )
         except EsriInvalidToken:
             # Force immediate token refresh before retrying this applyEdits call.
@@ -364,13 +390,21 @@ class FeatureServiceClient:
 
     @staticmethod
     def _build_form_data(token: str, payload: dict[str, object]) -> dict[str, str]:
+        """Build ArcGIS form data, preserving scalar query parameter values."""
         form_data: dict[str, str] = {
             "f": "json",
             "token": token,
             "rollbackOnFailure": "true",
         }
         for key, value in payload.items():
-            form_data[key] = json.dumps(value)
+            if isinstance(value, str):
+                form_data[key] = value
+            elif isinstance(value, bool):
+                form_data[key] = "true" if value else "false"
+            elif isinstance(value, (int, float)):
+                form_data[key] = str(value)
+            else:
+                form_data[key] = json.dumps(value)
         return form_data
 
     @staticmethod
@@ -397,10 +431,49 @@ class FeatureServiceClient:
         return cast(dict[str, object], response_data)
 
     @classmethod
-    def _parse_response_data(cls, response: httpx.Response) -> dict[str, object]:
+    def _parse_apply_edits_response_data(
+        cls,
+        response: httpx.Response,
+        *,
+        mode: _ApplyEditsMode,
+    ) -> dict[str, object]:
+        """Parse applyEdits response payload for the requested endpoint mode."""
+        if mode == "layer":
+            return cls._parse_layer_response_data(response)
+        return cls._parse_service_response_data(response)
+
+    @classmethod
+    def _parse_layer_response_data(cls, response: httpx.Response) -> dict[str, object]:
+        """Parse a layer-level applyEdits response, which must be a JSON object."""
         return cls._parse_json_object(
             response,
-            context_message="applyEdits response is not a valid JSON object.",
+            context_message="Layer applyEdits response is not a valid JSON object.",
+        )
+
+    @classmethod
+    def _parse_service_response_data(
+        cls, response: httpx.Response
+    ) -> dict[str, object]:
+        """Parse a service-level applyEdits response returned as an object or array."""
+        context_message = "Service applyEdits response is not a valid JSON object."
+        try:
+            response_data = response.json()
+        except ValueError as exc:
+            raise EsriRequestError(
+                context_message,
+                http_status=response.status_code,
+                response_body=response.text,
+            ) from exc
+
+        if isinstance(response_data, dict):
+            return cast(dict[str, object], response_data)
+        if isinstance(response_data, list):
+            return {"editedFeatureResults": cast(list[object], response_data)}
+
+        raise EsriRequestError(
+            context_message,
+            http_status=response.status_code,
+            response_body=response.text,
         )
 
     @staticmethod
@@ -462,13 +535,49 @@ class FeatureServiceClient:
             esri_code=esri_code,
         )
 
-    @staticmethod
+    @classmethod
     def _raise_for_rejected_edits(
+        cls,
+        *,
+        response_data: dict[str, object],
+        http_status: int,
+        mode: _ApplyEditsMode,
+    ) -> None:
+        if mode == "layer":
+            cls._raise_for_rejected_layer_edits(
+                response_data=response_data,
+                http_status=http_status,
+            )
+            return
+        cls._raise_for_rejected_service_edits(
+            response_data=response_data,
+            http_status=http_status,
+        )
+
+    @staticmethod
+    def _raise_for_rejected_layer_edits(
         *,
         response_data: dict[str, object],
         http_status: int,
     ) -> None:
-        rejected_count, total_count = count_rejected_edits(response_data)
+        rejected_count, total_count = count_rejected_layer_edits(response_data)
+        if not rejected_count:
+            return
+        raise EsriRejectedPayload(
+            f"ESRI applyEdits rejected {rejected_count}/{total_count} edits.",
+            http_status=http_status,
+            response_body=json.dumps(response_data),
+            rejected_count=rejected_count,
+            total_count=total_count,
+        )
+
+    @staticmethod
+    def _raise_for_rejected_service_edits(
+        *,
+        response_data: dict[str, object],
+        http_status: int,
+    ) -> None:
+        rejected_count, total_count = count_rejected_service_edits(response_data)
         if not rejected_count:
             return
         raise EsriRejectedPayload(
