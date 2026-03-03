@@ -20,7 +20,7 @@ from sdx_core.retry import RetryBackoffPolicy
 
 pytestmark = pytest.mark.asyncio
 
-_FEATURE_SERVICE_URL = "https://example.com/arcgis/rest/services/Layer/FeatureServer/0"
+_FEATURE_SERVICE_URL = "https://example.com/arcgis/rest/services/Layer/FeatureServer"
 _TOKEN_URL = "https://example.com/arcgis/sharing/rest/generateToken"
 
 
@@ -84,15 +84,16 @@ async def test_apply_edits_to_layer_maps_invalid_token_exhaustion_to_auth_unavai
             payload: dict[str, object],
             *,
             mode: str,
+            url: str,
             stop_event: asyncio.Event | None,
         ) -> dict[str, object]:
-            _ = (payload, mode, stop_event)
+            _ = (payload, mode, url, stop_event)
             raise esri_mod.EsriInvalidToken("bad token")
 
         monkeypatch.setattr(client, "_apply_edits_once", _raise_invalid)
 
         with pytest.raises(EsriAuthUnavailable, match="Token recovery failed"):
-            await client.apply_edits_to_layer({})
+            await client.apply_edits_to_layer(0, {})
         assert client._auth_failed is True
 
 
@@ -106,15 +107,16 @@ async def test_apply_edits_to_layer_propagates_processing_interrupted(
             payload: dict[str, object],
             *,
             mode: str,
+            url: str,
             stop_event: asyncio.Event | None,
         ) -> dict[str, object]:
-            _ = (payload, mode, stop_event)
+            _ = (payload, mode, url, stop_event)
             raise EsriProcessingInterrupted("stop now")
 
         monkeypatch.setattr(client, "_apply_edits_once", _raise_interrupted)
 
         with pytest.raises(EsriProcessingInterrupted):
-            await client.apply_edits_to_layer({})
+            await client.apply_edits_to_layer(0, {})
 
 
 async def test_apply_edits_to_layer_sets_auth_failed_when_auth_unavailable(
@@ -127,15 +129,16 @@ async def test_apply_edits_to_layer_sets_auth_failed_when_auth_unavailable(
             payload: dict[str, object],
             *,
             mode: str,
+            url: str,
             stop_event: asyncio.Event | None,
         ) -> dict[str, object]:
-            _ = (payload, mode, stop_event)
+            _ = (payload, mode, url, stop_event)
             raise EsriAuthUnavailable("auth dependency unavailable")
 
         monkeypatch.setattr(client, "_apply_edits_once", _raise_auth_unavailable)
 
         with pytest.raises(EsriAuthUnavailable):
-            await client.apply_edits_to_layer({})
+            await client.apply_edits_to_layer(0, {})
         assert client._auth_failed is True
 
 
@@ -151,7 +154,7 @@ async def test_apply_edits_to_layer_raises_runtime_error_if_retry_loop_returns_n
         with pytest.raises(
             RuntimeError, match="applyEdits retry loop exited unexpectedly"
         ):
-            await client.apply_edits_to_layer({})
+            await client.apply_edits_to_layer(0, {})
 
 
 async def test_refresh_token_with_retry_propagates_processing_interrupted() -> None:
@@ -252,7 +255,28 @@ async def test_apply_edits_once_wraps_request_errors(
         monkeypatch.setattr(http_client, "post", _raise_request_error)
 
         with pytest.raises(EsriTransientFailure, match="downstream unavailable"):
-            await client._apply_edits_once({}, mode="layer", stop_event=None)
+            await client._apply_edits_once(
+                {},
+                mode="layer",
+                url=f"{_FEATURE_SERVICE_URL}/0/applyEdits",
+                stop_event=None,
+            )
+
+
+async def test_init_rejects_feature_service_layer_url() -> None:
+    async with httpx.AsyncClient() as http_client:
+        with pytest.raises(
+            ValueError, match="feature_service_url must be a FeatureServer service URL"
+        ):
+            FeatureServiceClient(
+                client=http_client,
+                feature_service_url=f"{_FEATURE_SERVICE_URL}/0",
+                username="user",
+                password="pass",
+                referer="https://app.local",
+                token_expiration_minutes=60,
+                token_expiration_buffer_seconds=60.0,
+            )
 
 
 async def test_parse_json_object_raises_for_invalid_json_payload() -> None:

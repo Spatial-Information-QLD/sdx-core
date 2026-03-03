@@ -4,7 +4,7 @@ Shared Python runtime utilities for internal microservices.
 
 ## Package contents
 
-- `sdx_core.esri`: ESRI feature service client, token handling, retry policy, and domain exceptions. `FeatureServiceClient` supports both FeatureServer service URLs and layer URLs via separate `apply_edits_to_service()` and `apply_edits_to_layer()` methods; service-level array responses are normalized to `editedFeatureResults`, and scalar form parameters are preserved when building `applyEdits` requests.
+- `sdx_core.esri`: ESRI feature service client, token handling, retry policy, and domain exceptions. `FeatureServiceClient` is configured with a FeatureServer service URL, uses `apply_edits_to_service()` for service-level requests and `apply_edits_to_layer(layer_id, ...)` for layer-specific requests, normalizes service-level array responses to `editedFeatureResults`, and preserves scalar form parameters when building `applyEdits` requests.
 - `sdx_core.circuit_breaker`: framework-agnostic async circuit breaker with pluggable storage and listener hooks.
 - `sdx_core.logging`: structured logging helpers.
 - `sdx_core.settings`: base settings helpers for env-var configuration.

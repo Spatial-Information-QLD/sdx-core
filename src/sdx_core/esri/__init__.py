@@ -23,7 +23,12 @@ from sdx_core.esri.helpers import (
     extract_esri_error_code,
     summarize_esri_error,
 )
-from sdx_core.esri.url import derive_token_url
+from sdx_core.esri.url import (
+    build_layer_apply_edits_url,
+    build_service_apply_edits_url,
+    derive_token_url,
+    is_feature_service_layer_url,
+)
 from sdx_core.retry import (
     RetryBackoffPolicy,
     build_exponential_jitter_retrying,
@@ -155,7 +160,7 @@ class FeatureServiceClient:
 
         Args:
             client: Shared async HTTP client.
-            feature_service_url: ESRI FeatureServer service or layer URL.
+            feature_service_url: ESRI FeatureServer service URL.
             username: Username used for token generation.
             password: Password used for token generation.
             referer: Referer header required by ESRI token endpoint.
@@ -166,9 +171,16 @@ class FeatureServiceClient:
             retry_min_seconds: Minimum retry backoff in seconds.
             retry_max_seconds: Maximum retry backoff in seconds.
         """
+        normalized_feature_service_url = feature_service_url.rstrip("/")
+        if is_feature_service_layer_url(normalized_feature_service_url):
+            raise ValueError(
+                "feature_service_url must be a FeatureServer service URL, "
+                "not a layer URL."
+            )
+
         self._client = client
-        self._base_url = feature_service_url.rstrip("/")
-        self._token_url = derive_token_url(feature_service_url)
+        self._service_url = normalized_feature_service_url
+        self._token_url = derive_token_url(normalized_feature_service_url)
         self._username = username
         self._password = password
         self._referer = referer
@@ -213,12 +225,19 @@ class FeatureServiceClient:
 
     async def apply_edits_to_layer(
         self,
+        layer_id: int,
         payload: dict[str, object],
         *,
         stop_event: asyncio.Event | None = None,
     ) -> dict[str, object]:
-        """Submit applyEdits to a specific FeatureServer layer endpoint."""
-        return await self._apply_edits(payload, mode="layer", stop_event=stop_event)
+        """Submit applyEdits to a specific layer under the configured service."""
+        self._validate_layer_id(layer_id)
+        return await self._apply_edits(
+            payload,
+            mode="layer",
+            url=build_layer_apply_edits_url(self._service_url, layer_id),
+            stop_event=stop_event,
+        )
 
     async def apply_edits_to_service(
         self,
@@ -226,14 +245,20 @@ class FeatureServiceClient:
         *,
         stop_event: asyncio.Event | None = None,
     ) -> dict[str, object]:
-        """Submit applyEdits to a FeatureServer service endpoint."""
-        return await self._apply_edits(payload, mode="service", stop_event=stop_event)
+        """Submit applyEdits to the configured FeatureServer service endpoint."""
+        return await self._apply_edits(
+            payload,
+            mode="service",
+            url=build_service_apply_edits_url(self._service_url),
+            stop_event=stop_event,
+        )
 
     async def _apply_edits(
         self,
         payload: dict[str, object],
         *,
         mode: _ApplyEditsMode,
+        url: str,
         stop_event: asyncio.Event | None = None,
     ) -> dict[str, object]:
         """Submit one applyEdits request with transient retry and token recovery."""
@@ -251,6 +276,7 @@ class FeatureServiceClient:
                     response_data = await self._apply_edits_once(
                         payload,
                         mode=mode,
+                        url=url,
                         stop_event=stop_event,
                     )
                     self._auth_failed = False
@@ -355,10 +381,10 @@ class FeatureServiceClient:
         payload: dict[str, object],
         *,
         mode: _ApplyEditsMode,
+        url: str,
         stop_event: asyncio.Event | None,
     ) -> dict[str, object]:
         token = await self.ensure_token(stop_event=stop_event)
-        url = f"{self._base_url}/applyEdits"
         form_data = self._build_form_data(token, payload)
 
         try:
@@ -594,6 +620,11 @@ class FeatureServiceClient:
         if isinstance(expires, (int, float)):
             return float(expires) / 1000.0
         return time.time() + (55 * 60)
+
+    @staticmethod
+    def _validate_layer_id(layer_id: int) -> None:
+        if layer_id < 0:
+            raise ValueError("layer_id must be >= 0")
 
     @staticmethod
     def _raise_if_stopped(stop_event: asyncio.Event | None, message: str) -> None:
