@@ -22,9 +22,10 @@ from sdx_core.esri import (
 
 pytestmark = pytest.mark.asyncio
 
-_FEATURE_SERVICE_URL = "https://example.com/arcgis/rest/services/Layer/FeatureServer/0"
+_FEATURE_SERVICE_URL = "https://example.com/arcgis/rest/services/Layer/FeatureServer"
 _TOKEN_URL = "https://example.com/arcgis/sharing/rest/generateToken"
-_APPLY_EDITS_URL = f"{_FEATURE_SERVICE_URL}/applyEdits"
+_SERVICE_APPLY_EDITS_URL = f"{_FEATURE_SERVICE_URL}/applyEdits"
+_LAYER_APPLY_EDITS_URL = f"{_FEATURE_SERVICE_URL}/0/applyEdits"
 
 
 def _build_client(
@@ -195,7 +196,7 @@ async def test_ensure_token_stop_event_raises_interrupted_without_auth_failure(
     assert len(_requests_for(httpx_mock, _TOKEN_URL)) == 1
 
 
-async def test_apply_edits_stop_event_raises_interrupted_without_auth_failure(
+async def test_apply_edits_to_layer_stop_event_raises_interrupted_without_auth_failure(
     httpx_mock: HTTPXMock,
 ) -> None:
     httpx_mock.add_response(
@@ -212,17 +213,18 @@ async def test_apply_edits_stop_event_raises_interrupted_without_auth_failure(
         stop_event = asyncio.Event()
         stop_event.set()
         with pytest.raises(EsriProcessingInterrupted):
-            await client.apply_edits(
+            await client.apply_edits_to_layer(
+                0,
                 {"updates": [{"attributes": {"objectid": 1}}]},
                 stop_event=stop_event,
             )
         assert client.is_available() is True
 
     assert len(_requests_for(httpx_mock, _TOKEN_URL)) == 1
-    assert len(_requests_for(httpx_mock, _APPLY_EDITS_URL)) == 0
+    assert len(_requests_for(httpx_mock, _LAYER_APPLY_EDITS_URL)) == 0
 
 
-async def test_apply_edits_transient_retry_exhaustion_raises(
+async def test_apply_edits_to_layer_transient_retry_exhaustion_raises(
     httpx_mock: HTTPXMock,
 ) -> None:
     httpx_mock.add_response(
@@ -233,7 +235,7 @@ async def test_apply_edits_transient_retry_exhaustion_raises(
     for _ in range(4):
         httpx_mock.add_response(
             method="POST",
-            url=_APPLY_EDITS_URL,
+            url=_LAYER_APPLY_EDITS_URL,
             status_code=503,
             json={"error": {"code": 503, "message": "unavailable"}},
         )
@@ -241,15 +243,17 @@ async def test_apply_edits_transient_retry_exhaustion_raises(
     async with httpx.AsyncClient() as http_client:
         client = _build_client(http_client)
         with pytest.raises(EsriTransientFailure) as exc_info:
-            await client.apply_edits({"updates": [{"attributes": {"objectid": 1}}]})
+            await client.apply_edits_to_layer(
+                0, {"updates": [{"attributes": {"objectid": 1}}]}
+            )
     assert isinstance(exc_info.value, TransientError)
     assert isinstance(exc_info.value, EsriRequestError)
 
     assert len(_requests_for(httpx_mock, _TOKEN_URL)) == 1
-    assert len(_requests_for(httpx_mock, _APPLY_EDITS_URL)) == 4
+    assert len(_requests_for(httpx_mock, _LAYER_APPLY_EDITS_URL)) == 4
 
 
-async def test_apply_edits_invalid_token_recovers_and_succeeds(
+async def test_apply_edits_to_layer_invalid_token_recovers_and_succeeds(
     httpx_mock: HTTPXMock,
 ) -> None:
     httpx_mock.add_response(
@@ -259,7 +263,7 @@ async def test_apply_edits_invalid_token_recovers_and_succeeds(
     )
     httpx_mock.add_response(
         method="POST",
-        url=_APPLY_EDITS_URL,
+        url=_LAYER_APPLY_EDITS_URL,
         json={"error": {"code": 498, "message": "invalid token"}},
     )
     httpx_mock.add_response(
@@ -269,29 +273,109 @@ async def test_apply_edits_invalid_token_recovers_and_succeeds(
     )
     httpx_mock.add_response(
         method="POST",
-        url=_APPLY_EDITS_URL,
+        url=_LAYER_APPLY_EDITS_URL,
         json={"updateResults": [{"objectId": 1, "success": True}]},
     )
 
     async with httpx.AsyncClient() as http_client:
         client = _build_client(http_client)
-        response = await client.apply_edits(
-            {"updates": [{"attributes": {"objectid": 1}}]}
+        response = await client.apply_edits_to_layer(
+            0, {"updates": [{"attributes": {"objectid": 1}}]}
         )
 
     update_results = cast(list[dict[str, object]], response["updateResults"])
     assert update_results[0]["objectId"] == 1
     assert len(_requests_for(httpx_mock, _TOKEN_URL)) == 2
-    assert len(_requests_for(httpx_mock, _APPLY_EDITS_URL)) == 2
+    assert len(_requests_for(httpx_mock, _LAYER_APPLY_EDITS_URL)) == 2
 
-    apply_request = _requests_for(httpx_mock, _APPLY_EDITS_URL)[0]
+    apply_request = _requests_for(httpx_mock, _LAYER_APPLY_EDITS_URL)[0]
     apply_form = parse_qs(apply_request.content.decode("utf-8"))
     assert apply_form["f"] == ["json"]
     assert apply_form["rollbackOnFailure"] == ["true"]
 
 
+async def test_apply_edits_to_service_returns_raw_array_and_preserves_form_values(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        method="POST",
+        url=_TOKEN_URL,
+        json={"token": "abc", "expires": int(time.time() * 1000) + 120_000},
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=_SERVICE_APPLY_EDITS_URL,
+        text='[{"id":0,"editedFeatures":{"adds":[{"attributes":{"iri":"https://example.com/a/1","pid":123}}]}}]',
+    )
+
+    async with httpx.AsyncClient() as http_client:
+        client = _build_client(http_client)
+        response = await client.apply_edits_to_service(
+            {
+                "edits": [{"id": 2}],
+                "returnServiceEditsOption": "originalAndCurrentFeatures",
+                "useGlobalIds": False,
+                "layer": 3,
+            }
+        )
+
+    assert response == [
+        {
+            "id": 0,
+            "editedFeatures": {
+                "adds": [
+                    {
+                        "attributes": {
+                            "iri": "https://example.com/a/1",
+                            "pid": 123,
+                        }
+                    }
+                ]
+            },
+        }
+    ]
+
+    apply_request = _requests_for(httpx_mock, _SERVICE_APPLY_EDITS_URL)[0]
+    apply_form = parse_qs(apply_request.content.decode("utf-8"))
+    assert apply_form["edits"] == ['[{"id": 2}]']
+    assert apply_form["rollbackOnFailure"] == ["true"]
+    assert apply_form["returnServiceEditsOption"] == ["originalAndCurrentFeatures"]
+    assert apply_form["useGlobalIds"] == ["false"]
+    assert apply_form["layer"] == ["3"]
+
+
+async def test_apply_edits_to_service_forces_transactional_form_values(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        method="POST",
+        url=_TOKEN_URL,
+        json={"token": "abc", "expires": int(time.time() * 1000) + 120_000},
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=_SERVICE_APPLY_EDITS_URL,
+        text='[{"id":0,"editedFeatures":{"adds":[]}}]',
+    )
+
+    async with httpx.AsyncClient() as http_client:
+        client = _build_client(http_client)
+        await client.apply_edits_to_service(
+            {
+                "edits": [{"id": 2}],
+                "rollbackOnFailure": False,
+                "returnServiceEditsOption": "none",
+            }
+        )
+
+    apply_request = _requests_for(httpx_mock, _SERVICE_APPLY_EDITS_URL)[0]
+    apply_form = parse_qs(apply_request.content.decode("utf-8"))
+    assert apply_form["rollbackOnFailure"] == ["true"]
+    assert apply_form["returnServiceEditsOption"] == ["originalAndCurrentFeatures"]
+
+
 @pytest.mark.parametrize("status_code", [404, 405])
-async def test_apply_edits_maps_dependency_misconfigured_statuses(
+async def test_apply_edits_to_layer_maps_dependency_misconfigured_statuses(
     httpx_mock: HTTPXMock,
     status_code: int,
 ) -> None:
@@ -302,7 +386,7 @@ async def test_apply_edits_maps_dependency_misconfigured_statuses(
     )
     httpx_mock.add_response(
         method="POST",
-        url=_APPLY_EDITS_URL,
+        url=_LAYER_APPLY_EDITS_URL,
         status_code=status_code,
         json={"error": {"code": status_code, "message": "misconfigured"}},
     )
@@ -310,10 +394,12 @@ async def test_apply_edits_maps_dependency_misconfigured_statuses(
     async with httpx.AsyncClient() as http_client:
         client = _build_client(http_client)
         with pytest.raises(EsriDependencyMisconfigured):
-            await client.apply_edits({"updates": [{"attributes": {"objectid": 1}}]})
+            await client.apply_edits_to_layer(
+                0, {"updates": [{"attributes": {"objectid": 1}}]}
+            )
 
 
-async def test_apply_edits_maps_partial_success_to_rejected_payload(
+async def test_apply_edits_to_layer_forces_rollback_on_failure(
     httpx_mock: HTTPXMock,
 ) -> None:
     httpx_mock.add_response(
@@ -323,19 +409,103 @@ async def test_apply_edits_maps_partial_success_to_rejected_payload(
     )
     httpx_mock.add_response(
         method="POST",
-        url=_APPLY_EDITS_URL,
+        url=_LAYER_APPLY_EDITS_URL,
+        json={"updateResults": [{"objectId": 1, "success": True}]},
+    )
+
+    async with httpx.AsyncClient() as http_client:
+        client = _build_client(http_client)
+        await client.apply_edits_to_layer(
+            0,
+            {
+                "updates": [{"attributes": {"objectid": 1}}],
+                "rollbackOnFailure": False,
+            },
+        )
+
+    apply_request = _requests_for(httpx_mock, _LAYER_APPLY_EDITS_URL)[0]
+    apply_form = parse_qs(apply_request.content.decode("utf-8"))
+    assert apply_form["rollbackOnFailure"] == ["true"]
+
+
+async def test_apply_edits_to_layer_maps_top_level_error_to_rejected_payload(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        method="POST",
+        url=_TOKEN_URL,
+        json={"token": "abc", "expires": int(time.time() * 1000) + 120_000},
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=_LAYER_APPLY_EDITS_URL,
         json={
-            "updateResults": [
-                {"objectId": 1, "success": True},
-                {"objectId": 2, "success": False, "error": {"code": 400}},
-            ]
+            "error": {
+                "code": 400,
+                "extendedCode": -2147207418,
+                "message": "Unable to complete operation.",
+                "details": [
+                    "Violated attribute constraint rule. [Error No: -1, ]",
+                    "Operation rolled back.",
+                ],
+            }
         },
     )
 
     async with httpx.AsyncClient() as http_client:
         client = _build_client(http_client)
         with pytest.raises(EsriRejectedPayload) as exc_info:
-            await client.apply_edits({"updates": [{"attributes": {"objectid": 1}}]})
+            await client.apply_edits_to_layer(
+                0,
+                {"updates": [{"attributes": {"objectid": 1}}]},
+            )
 
-    assert exc_info.value.rejected_count == 1
-    assert exc_info.value.total_count == 2
+    assert exc_info.value.esri_code == 400
+
+
+async def test_apply_edits_to_service_maps_top_level_error_to_rejected_payload(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        method="POST",
+        url=_TOKEN_URL,
+        json={"token": "abc", "expires": int(time.time() * 1000) + 120_000},
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=_SERVICE_APPLY_EDITS_URL,
+        json={
+            "error": {
+                "code": 400,
+                "extendedCode": -2147207418,
+                "message": "Unable to complete operation.",
+                "details": [
+                    "Violated attribute constraint rule. [Error No: -1, ]",
+                    "Operation rolled back.",
+                ],
+            }
+        },
+    )
+
+    async with httpx.AsyncClient() as http_client:
+        client = _build_client(http_client)
+        with pytest.raises(EsriRejectedPayload) as exc_info:
+            await client.apply_edits_to_service(
+                {"edits": [{"id": 0, "adds": [{"attributes": {"objectid": 1}}]}]}
+            )
+
+    assert exc_info.value.esri_code == 400
+
+
+async def test_apply_edits_to_layer_rejects_invalid_layer_id(
+    httpx_mock: HTTPXMock,
+) -> None:
+    _ = httpx_mock
+
+    async with httpx.AsyncClient() as http_client:
+        client = _build_client(http_client)
+        with pytest.raises(ValueError, match="layer_id must be >= 0"):
+            await client.apply_edits_to_layer(
+                -1,
+                {"updates": [{"attributes": {"objectid": 1}}]},
+            )

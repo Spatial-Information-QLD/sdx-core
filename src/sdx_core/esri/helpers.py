@@ -21,23 +21,3 @@ def extract_esri_error_code(error: object) -> int | None:
     if isinstance(error, dict) and isinstance(error.get("code"), int):
         return cast(int, error["code"])
     return None
-
-
-def count_rejected_edits(response_data: dict[str, object]) -> tuple[int, int]:
-    """Count failed edit items from applyEdits response payload."""
-    rejected = 0
-    total = 0
-    for key in ("addResults", "updateResults", "deleteResults"):
-        results = response_data.get(key)
-        if not isinstance(results, list):
-            continue
-        for item in results:
-            if not isinstance(item, dict):
-                continue
-            success = item.get("success")
-            if not isinstance(success, bool):
-                continue
-            total += 1
-            if not success:
-                rejected += 1
-    return rejected, total
