@@ -139,6 +139,21 @@ async def test_pauser_resume_clears_paused_flag_when_consumer_becomes_missing() 
     assert confluent_consumer.resume_calls == 0
 
 
+async def test_pauser_resume_clears_paused_flag_when_assignments_empty() -> None:
+    confluent_consumer = _FakeConfluentConsumer(assignments=("tp-1",))
+    subscriber = _FakeSubscriber(
+        consumer=_FakeAsyncConfluentConsumer(confluent_consumer)
+    )
+    pauser = ConfluentAssignmentPauser(subscriber=subscriber)
+
+    await pauser.pause_assigned()
+    confluent_consumer.assignments = ()
+    await pauser.resume_assigned()
+    await pauser.resume_assigned()
+
+    assert confluent_consumer.resume_calls == 0
+
+
 async def test_listener_open_pauses_and_schedules_resume() -> None:
     pauser = _RecordingPauser()
     listener = CircuitPauseResumeListener(
@@ -208,3 +223,29 @@ async def test_listener_noop_callbacks_and_close_without_task() -> None:
     await listener.on_call_succeeded("svc", 0.1)
     await listener.on_call_failed("svc", RuntimeError("boom"), 0.2)
     await listener.close()
+
+
+async def test_listener_ignores_non_open_non_recovery_state_changes() -> None:
+    pauser = _RecordingPauser()
+    listener = CircuitPauseResumeListener(
+        pauser=pauser,
+        recovery_timeout_seconds=0.1,
+    )
+
+    await listener.on_state_change("svc", CircuitState.CLOSED, CircuitState.CLOSED)
+
+    assert pauser.pause_calls == 0
+    assert pauser.resume_calls == 0
+
+
+async def test_listener_half_open_to_closed_resumes_without_scheduled_task() -> None:
+    pauser = _RecordingPauser()
+    listener = CircuitPauseResumeListener(
+        pauser=pauser,
+        recovery_timeout_seconds=0.1,
+    )
+
+    await listener.on_state_change("svc", CircuitState.HALF_OPEN, CircuitState.CLOSED)
+
+    assert pauser.pause_calls == 0
+    assert pauser.resume_calls == 1

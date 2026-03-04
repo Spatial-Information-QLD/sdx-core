@@ -212,3 +212,20 @@ def test_faststream_context_merger_merges_extra_with_log_context() -> None:
         "offset": 7,
         "123": "numeric-key",
     }
+
+
+def test_faststream_context_merger_replaces_non_mapping_extra() -> None:
+    class _MappingContext:
+        def get_local(self, name: str) -> object:
+            _ = name
+            return {"topic": "from-context"}
+
+    processor = _build_faststream_context_merger(cast(ContextRepo, _MappingContext()))
+    event_dict: structlog.typing.EventDict = {
+        "event": "test",
+        "extra": "not-a-mapping",
+    }
+
+    merged = processor(None, "info", event_dict)
+
+    assert cast(dict[str, object], merged)["extra"] == {"topic": "from-context"}

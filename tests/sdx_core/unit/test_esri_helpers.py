@@ -18,6 +18,10 @@ def test_summarize_esri_error_falls_back_to_json_dump() -> None:
     )
 
 
+def test_summarize_esri_error_falls_back_to_json_dump_for_non_mapping() -> None:
+    assert summarize_esri_error(["not", "a", "mapping"]) == '["not", "a", "mapping"]'
+
+
 def test_extract_esri_error_code_requires_integer_code() -> None:
     assert extract_esri_error_code({"code": 503}) == 503
     assert extract_esri_error_code({"code": "503"}) is None

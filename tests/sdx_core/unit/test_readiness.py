@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from contextlib import suppress
 from typing import cast
 
 import pytest
@@ -606,6 +607,21 @@ async def test_metadata_fetch_coordinator_resets_inflight_on_fetch_failure() -> 
         )
 
     assert coordinator._inflight_task is None
+
+
+async def test_metadata_fetch_coordinator_ignores_stale_done_callback() -> None:
+    coordinator = readiness_mod._MetadataFetchCoordinator()
+    current = asyncio.create_task(asyncio.sleep(0))
+    stale = asyncio.create_task(asyncio.sleep(0))
+    coordinator._inflight_task = current
+
+    coordinator._on_fetch_task_done(stale)
+    await stale
+    current.cancel()
+    with suppress(asyncio.CancelledError):
+        await current
+
+    assert coordinator._inflight_task is current
 
 
 async def test_readiness_manager_stop_background_cancels_task_after_timeout(
