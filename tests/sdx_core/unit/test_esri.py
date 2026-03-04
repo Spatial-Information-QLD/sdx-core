@@ -294,7 +294,7 @@ async def test_apply_edits_to_layer_invalid_token_recovers_and_succeeds(
     assert apply_form["rollbackOnFailure"] == ["true"]
 
 
-async def test_apply_edits_to_service_wraps_array_response_and_preserves_form_values(
+async def test_apply_edits_to_service_returns_raw_array_and_preserves_form_values(
     httpx_mock: HTTPXMock,
 ) -> None:
     httpx_mock.add_response(
@@ -319,30 +319,59 @@ async def test_apply_edits_to_service_wraps_array_response_and_preserves_form_va
             }
         )
 
-    assert response == {
-        "editedFeatureResults": [
-            {
-                "id": 0,
-                "editedFeatures": {
-                    "adds": [
-                        {
-                            "attributes": {
-                                "iri": "https://example.com/a/1",
-                                "pid": 123,
-                            }
+    assert response == [
+        {
+            "id": 0,
+            "editedFeatures": {
+                "adds": [
+                    {
+                        "attributes": {
+                            "iri": "https://example.com/a/1",
+                            "pid": 123,
                         }
-                    ]
-                },
-            }
-        ]
-    }
+                    }
+                ]
+            },
+        }
+    ]
 
     apply_request = _requests_for(httpx_mock, _SERVICE_APPLY_EDITS_URL)[0]
     apply_form = parse_qs(apply_request.content.decode("utf-8"))
     assert apply_form["edits"] == ['[{"id": 2}]']
+    assert apply_form["rollbackOnFailure"] == ["true"]
     assert apply_form["returnServiceEditsOption"] == ["originalAndCurrentFeatures"]
     assert apply_form["useGlobalIds"] == ["false"]
     assert apply_form["layer"] == ["3"]
+
+
+async def test_apply_edits_to_service_forces_transactional_form_values(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        method="POST",
+        url=_TOKEN_URL,
+        json={"token": "abc", "expires": int(time.time() * 1000) + 120_000},
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=_SERVICE_APPLY_EDITS_URL,
+        text='[{"id":0,"editedFeatures":{"adds":[]}}]',
+    )
+
+    async with httpx.AsyncClient() as http_client:
+        client = _build_client(http_client)
+        await client.apply_edits_to_service(
+            {
+                "edits": [{"id": 2}],
+                "rollbackOnFailure": False,
+                "returnServiceEditsOption": "none",
+            }
+        )
+
+    apply_request = _requests_for(httpx_mock, _SERVICE_APPLY_EDITS_URL)[0]
+    apply_form = parse_qs(apply_request.content.decode("utf-8"))
+    assert apply_form["rollbackOnFailure"] == ["true"]
+    assert apply_form["returnServiceEditsOption"] == ["originalAndCurrentFeatures"]
 
 
 @pytest.mark.parametrize("status_code", [404, 405])
@@ -370,7 +399,36 @@ async def test_apply_edits_to_layer_maps_dependency_misconfigured_statuses(
             )
 
 
-async def test_apply_edits_to_layer_maps_partial_success_to_rejected_payload(
+async def test_apply_edits_to_layer_forces_rollback_on_failure(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        method="POST",
+        url=_TOKEN_URL,
+        json={"token": "abc", "expires": int(time.time() * 1000) + 120_000},
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=_LAYER_APPLY_EDITS_URL,
+        json={"updateResults": [{"objectId": 1, "success": True}]},
+    )
+
+    async with httpx.AsyncClient() as http_client:
+        client = _build_client(http_client)
+        await client.apply_edits_to_layer(
+            0,
+            {
+                "updates": [{"attributes": {"objectid": 1}}],
+                "rollbackOnFailure": False,
+            },
+        )
+
+    apply_request = _requests_for(httpx_mock, _LAYER_APPLY_EDITS_URL)[0]
+    apply_form = parse_qs(apply_request.content.decode("utf-8"))
+    assert apply_form["rollbackOnFailure"] == ["true"]
+
+
+async def test_apply_edits_to_layer_maps_top_level_error_to_rejected_payload(
     httpx_mock: HTTPXMock,
 ) -> None:
     httpx_mock.add_response(
@@ -382,10 +440,15 @@ async def test_apply_edits_to_layer_maps_partial_success_to_rejected_payload(
         method="POST",
         url=_LAYER_APPLY_EDITS_URL,
         json={
-            "updateResults": [
-                {"objectId": 1, "success": True},
-                {"objectId": 2, "success": False, "error": {"code": 400}},
-            ]
+            "error": {
+                "code": 400,
+                "extendedCode": -2147207418,
+                "message": "Unable to complete operation.",
+                "details": [
+                    "Violated attribute constraint rule. [Error No: -1, ]",
+                    "Operation rolled back.",
+                ],
+            }
         },
     )
 
@@ -393,14 +456,14 @@ async def test_apply_edits_to_layer_maps_partial_success_to_rejected_payload(
         client = _build_client(http_client)
         with pytest.raises(EsriRejectedPayload) as exc_info:
             await client.apply_edits_to_layer(
-                0, {"updates": [{"attributes": {"objectid": 1}}]}
+                0,
+                {"updates": [{"attributes": {"objectid": 1}}]},
             )
 
-    assert exc_info.value.rejected_count == 1
-    assert exc_info.value.total_count == 2
+    assert exc_info.value.esri_code == 400
 
 
-async def test_apply_edits_to_service_maps_partial_success_to_rejected_payload(
+async def test_apply_edits_to_service_maps_top_level_error_to_rejected_payload(
     httpx_mock: HTTPXMock,
 ) -> None:
     httpx_mock.add_response(
@@ -412,21 +475,15 @@ async def test_apply_edits_to_service_maps_partial_success_to_rejected_payload(
         method="POST",
         url=_SERVICE_APPLY_EDITS_URL,
         json={
-            "editedFeatureResults": [
-                {
-                    "id": 0,
-                    "addResults": [
-                        {"objectId": 1, "success": True},
-                        {"objectId": 2, "success": False, "error": {"code": 400}},
-                    ],
-                },
-                {
-                    "id": 1,
-                    "updateResults": [
-                        {"objectId": 3, "success": True},
-                    ],
-                },
-            ]
+            "error": {
+                "code": 400,
+                "extendedCode": -2147207418,
+                "message": "Unable to complete operation.",
+                "details": [
+                    "Violated attribute constraint rule. [Error No: -1, ]",
+                    "Operation rolled back.",
+                ],
+            }
         },
     )
 
@@ -437,8 +494,7 @@ async def test_apply_edits_to_service_maps_partial_success_to_rejected_payload(
                 {"edits": [{"id": 0, "adds": [{"attributes": {"objectid": 1}}]}]}
             )
 
-    assert exc_info.value.rejected_count == 1
-    assert exc_info.value.total_count == 3
+    assert exc_info.value.esri_code == 400
 
 
 async def test_apply_edits_to_layer_rejects_invalid_layer_id(

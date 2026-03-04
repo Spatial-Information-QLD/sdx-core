@@ -308,6 +308,7 @@ async def test_build_form_data_preserves_scalar_values() -> None:
             "useGlobalIds": False,
             "layer": 3,
         },
+        mode="service",
     )
 
     assert form_data == {
@@ -343,7 +344,7 @@ async def test_parse_service_response_data_accepts_json_object() -> None:
     assert parsed == {"editedFeatureResults": [{"id": 0}]}
 
 
-async def test_parse_service_response_data_wraps_json_array() -> None:
+async def test_parse_service_response_data_returns_json_array_unchanged() -> None:
     response = httpx.Response(
         200,
         text='[{"id":0,"editedFeatures":{"adds":[{"attributes":{"iri":"https://example.com/a/1","pid":123}}]}}]',
@@ -351,23 +352,21 @@ async def test_parse_service_response_data_wraps_json_array() -> None:
 
     parsed = FeatureServiceClient._parse_service_response_data(response)
 
-    assert parsed == {
-        "editedFeatureResults": [
-            {
-                "id": 0,
-                "editedFeatures": {
-                    "adds": [
-                        {
-                            "attributes": {
-                                "iri": "https://example.com/a/1",
-                                "pid": 123,
-                            }
+    assert parsed == [
+        {
+            "id": 0,
+            "editedFeatures": {
+                "adds": [
+                    {
+                        "attributes": {
+                            "iri": "https://example.com/a/1",
+                            "pid": 123,
                         }
-                    ]
-                },
-            }
-        ]
-    }
+                    }
+                ]
+            },
+        }
+    ]
 
 
 async def test_parse_layer_response_data_rejects_json_array() -> None:
@@ -380,14 +379,14 @@ async def test_parse_layer_response_data_rejects_json_array() -> None:
 async def test_parse_service_response_data_rejects_non_object_non_array() -> None:
     response = httpx.Response(200, text='"not-an-object"')
 
-    with pytest.raises(EsriRequestError, match="valid JSON object"):
+    with pytest.raises(EsriRequestError, match="valid JSON object or array"):
         FeatureServiceClient._parse_service_response_data(response)
 
 
 async def test_parse_service_response_data_rejects_invalid_json() -> None:
     response = httpx.Response(200, text="{")
 
-    with pytest.raises(EsriRequestError, match="valid JSON object"):
+    with pytest.raises(EsriRequestError, match="valid JSON object or array"):
         FeatureServiceClient._parse_service_response_data(response)
 
 
@@ -425,6 +424,13 @@ async def test_raise_for_esri_error_maps_other_codes_to_rejected_payload() -> No
             response_data={"error": {"code": 400, "message": "invalid payload"}},
             http_status=200,
         )
+
+
+async def test_raise_for_esri_error_ignores_service_success_array() -> None:
+    FeatureServiceClient._raise_for_esri_error(
+        response_data=[{"id": 0, "updateResults": [{"objectId": 1, "success": True}]}],
+        http_status=200,
+    )
 
 
 async def test_extract_expiry_falls_back_when_expires_missing(
