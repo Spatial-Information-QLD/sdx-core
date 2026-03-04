@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v1.1.0 (2026-03-04)
+
+### Features
+
+- Split ESRI applyEdits service and layer methods
+  ([`42f4ab7`](https://github.com/Spatial-Information-QLD/sdx-core/commit/42f4ab7abba8d40c2c939478623ba2de0a08ed64))
+
+### Refactoring
+
+- Enforce transactional ESRI applyEdits
+  ([`c31276e`](https://github.com/Spatial-Information-QLD/sdx-core/commit/c31276ec3fe25cfcfbcc96b663e76e0a16ecac05))
+
+- Require service base URL for ESRI client
+  ([`c0f53b0`](https://github.com/Spatial-Information-QLD/sdx-core/commit/c0f53b00f1235cbbb71d2688233076cf8a4f7c13))
+
+### Testing
+
+- Achieve 100 percent coverage for sdx_core
+  ([`f7632a7`](https://github.com/Spatial-Information-QLD/sdx-core/commit/f7632a7c23ab103f3ec1496fb2c95a2e1bddc069))
+
+
 ## v1.0.1 (2026-02-23)
 
 ### Bug Fixes
