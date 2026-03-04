@@ -38,6 +38,7 @@ def test_derive_token_url(feature_service_url: str, expected: str) -> None:
 @pytest.mark.parametrize(
     ("feature_service_url", "expected"),
     [
+        ("https://example.com", False),
         ("https://example.com/arcgis/rest/services/Layer/FeatureServer", False),
         ("https://example.com/arcgis/rest/services/Layer/FeatureServer/0", True),
         ("https://example.com/arcgis/rest/services/Layer/MapServer/0", False),

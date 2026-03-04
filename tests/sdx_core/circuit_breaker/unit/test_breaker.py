@@ -304,3 +304,39 @@ async def test_listener_exceptions_are_swallowed_for_all_non_success_events() ->
         ("svc", CircuitState.CLOSED, CircuitState.OPEN),
     ) in recording.events
     assert ("rejected", "svc") in recording.events
+
+
+async def test_call_without_current_task_skips_task_naming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = InMemoryBreakerStorage()
+    breaker = CircuitBreaker(
+        "svc",
+        config=CircuitBreakerConfig(failure_threshold=1, recovery_timeout=1.0),
+        storage=storage,
+    )
+    monkeypatch.setattr(asyncio, "current_task", lambda: None)
+
+    async def _ok() -> str:
+        return "ok"
+
+    assert await breaker.call(_ok) == "ok"
+
+
+async def test_failure_below_threshold_does_not_force_open() -> None:
+    storage = InMemoryBreakerStorage()
+    breaker = CircuitBreaker(
+        "svc",
+        config=CircuitBreakerConfig(failure_threshold=2, recovery_timeout=10.0),
+        storage=storage,
+    )
+
+    async def _fail() -> None:
+        raise RuntimeError("nope")
+
+    with pytest.raises(RuntimeError):
+        await breaker.call(_fail)
+
+    snapshot = await storage.get_state("svc")
+    assert snapshot.state == CircuitState.CLOSED
+    assert snapshot.failure_count == 1

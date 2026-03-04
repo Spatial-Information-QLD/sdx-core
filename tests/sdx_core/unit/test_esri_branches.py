@@ -322,6 +322,18 @@ async def test_build_form_data_preserves_scalar_values() -> None:
     }
 
 
+async def test_build_form_data_preserves_non_forced_string_values() -> None:
+    form_data = FeatureServiceClient._build_form_data(
+        "token-1",
+        {
+            "where": "objectid = 1",
+        },
+        mode="layer",
+    )
+
+    assert form_data["where"] == "objectid = 1"
+
+
 async def test_parse_layer_response_data_accepts_json_object() -> None:
     response = httpx.Response(
         200,
